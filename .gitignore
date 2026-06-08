@@ -1,0 +1,35 @@
+# .gitignore for github_migrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Environment / secrets — NEVER commit these
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool output
+output/
+
+# Temporary clone directories created during migration
+mirror_repo.git/
+temp_loc_repo/
+
+# Log file
+migrator.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
