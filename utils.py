@@ -4,6 +4,8 @@ utils.py
 Shared helpers used across task1_collector.py and task2_migrator.py.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import shutil

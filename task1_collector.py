@@ -9,6 +9,8 @@ Usage (called from main.py — do not run directly):
     run_task1(loc_method="api")   # or "clone"
 """
 
+from __future__ import annotations
+
 import csv
 import json
 import logging
@@ -17,6 +19,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any
+
 
 from github import Github, GithubException
 

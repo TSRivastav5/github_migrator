@@ -9,6 +9,8 @@ Usage (called from main.py — do not run directly):
     run_task2(pr_list)    # pr_list from task1_collector.run_task1()
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
