@@ -130,3 +130,57 @@ def remove_dir(path: str) -> None:
         logger.debug("Removed directory: %s", path)
     except Exception as exc:  # pragma: no cover
         logger.warning("Could not remove %s: %s", path, exc)
+
+
+# ── Runtime credential validation ─────────────────────────────────────────────
+
+def validate_token(
+    platform: str,
+    token: str,
+    base_url: str = "https://github.com",
+) -> tuple[bool, str | None]:
+    """
+    Verify an API token against the platform's user-identity endpoint.
+
+    Parameters
+    ----------
+    platform : "github" | "gitlab"
+    token    : The Personal Access Token to verify.
+    base_url : Base URL of the instance.  Only meaningful for GitLab
+               (defaults to https://github.com for GitHub, which is
+               always used regardless of the value passed).
+
+    Returns
+    -------
+    (True, username)  on success
+    (False, None)     on failure (invalid token, network error, etc.)
+    """
+    try:
+        if platform == "github":
+            resp = requests.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization":        f"token {token}",
+                    "Accept":               "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                return True, resp.json().get("login")
+            return False, None
+
+        else:  # gitlab
+            url = f"{base_url.rstrip('/')}/api/v4/user"
+            resp = requests.get(
+                url,
+                headers={"PRIVATE-TOKEN": token},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                return True, resp.json().get("username")
+            return False, None
+
+    except Exception as exc:
+        logger.debug("validate_token error (%s): %s", platform, exc)
+        return False, None

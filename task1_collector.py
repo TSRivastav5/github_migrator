@@ -320,37 +320,57 @@ def export_loc_data(loc_data: dict, output_dir: str) -> None:
 # Public entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_task1(loc_method: str = "api") -> tuple[list[dict], dict]:
+def run_task1(
+    loc_method: str = "api",
+    adapter=None,
+) -> tuple[list[dict], dict]:
     """
-    Execute Task 1: collect PR data + LOC data, export to output/.
+    Execute Task 1: collect PR / MR data + LOC data, export to output/.
 
     Parameters
     ----------
-    loc_method : "api"   → use GitHub language API (byte counts)
+    loc_method : "api"   → use platform language API (byte / percent counts)
                  "clone" → clone locally and run cloc (true line counts)
+    adapter    : Optional PlatformAdapter instance.  When provided (e.g. GitLab),
+                 PR fetching and LOC calculation are delegated to the adapter.
+                 When None (default), the existing GitHub SDK path is used —
+                 behaviour is byte-for-byte identical to the pre-adapter version.
 
     Returns
     -------
     (pr_list, loc_data) — raw data structures for reuse by Task 2.
     """
     logger.info("═" * 60)
-    logger.info("TASK 1 — PR & LOC Collection  |  method=%s", loc_method)
+    logger.info(
+        "TASK 1 — %s & LOC Collection  |  method=%s",
+        "MR" if adapter and adapter.platform_name == "GitLab" else "PR",
+        loc_method,
+    )
     logger.info("═" * 60)
 
-    g    = Github(config.SOURCE_TOKEN, per_page=100)
-    repo = g.get_repo(config.SOURCE_REPO)
+    # ── Pull Requests / Merge Requests ────────────────────────────────────────
+    if adapter is not None:
+        # Delegate to platform adapter (GitLab or any future platform)
+        pr_list = adapter.fetch_pull_requests()
+    else:
+        # Original GitHub path — zero change
+        g    = Github(config.SOURCE_TOKEN, per_page=100)
+        repo = g.get_repo(config.SOURCE_REPO)
+        pr_list = collect_pull_requests(g, repo)
 
-    # ── Pull Requests ──────────────────────────────────────────────────────────
-    pr_list = collect_pull_requests(g, repo)
     export_pr_data(pr_list, config.OUTPUT_DIR)
 
     # ── LOC ───────────────────────────────────────────────────────────────────
-    if loc_method == "clone":
+    if adapter is not None:
+        loc_data = adapter.calculate_loc(loc_method)
+    elif loc_method == "clone":
         source_url = (
             f"https://{config.SOURCE_TOKEN}@github.com/{config.SOURCE_REPO}.git"
         )
         loc_data = _loc_via_clone(source_url)
     else:
+        g    = Github(config.SOURCE_TOKEN, per_page=100)
+        repo = g.get_repo(config.SOURCE_REPO)
         loc_data = _loc_via_api(repo)
 
     export_loc_data(loc_data, config.OUTPUT_DIR)

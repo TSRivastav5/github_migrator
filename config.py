@@ -1,118 +1,79 @@
 """
 config.py
 ─────────
-Loads all credentials and repository configuration from environment variables
-(via a .env file).  Token validity is checked at import time so failures
-surface early, before any heavy work begins.
+Defines RunConfig — the single runtime configuration object built entirely
+from GUI dialog inputs.  No .env file is read.  Credentials live only in
+memory for the duration of the run; nothing is written to disk except the
+output CSV/JSON files in OUTPUT_DIR.
+
+Quick reference
+───────────────
+    from config import RunConfig, OUTPUT_DIR
+
+    cfg = RunConfig(
+        platform        = "github",
+        source_token    = "ghp_...",
+        source_repo     = "owner/repo",
+        source_base_url = "https://github.com",
+        dest_token      = "ghp_...",
+        dest_owner      = "dest-org",
+        dest_repo       = "new-repo",
+        dest_base_url   = "https://github.com",
+        dest_private    = True,
+    )
 """
 
+from __future__ import annotations
+
 import os
-import sys
-import logging
+from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
+# ── Shared constants ───────────────────────────────────────────────────────────
 
-load_dotenv()
-
-logger = logging.getLogger(__name__)
-
-# ── Raw values from environment ────────────────────────────────────────────────
-
-SOURCE_TOKEN: str = os.getenv("SOURCE_TOKEN", "")
-DEST_TOKEN: str   = os.getenv("DEST_TOKEN", "")
-
-# Format: "owner/repo"  e.g. "acme-corp/backend-api"
-SOURCE_REPO: str  = os.getenv("SOURCE_REPO", "")
-DEST_REPO: str    = os.getenv("DEST_REPO", "")
-DEST_OWNER: str   = os.getenv("DEST_OWNER", "")
-
-# Whether to make the destination repo private (default: True)
-DEST_PRIVATE: bool = os.getenv("DEST_PRIVATE", "true").lower() == "true"
-
-# Output directory for CSV / JSON files
+# Output directory for CSV / JSON files (not a credential — always this path).
 OUTPUT_DIR: str = os.path.join(os.path.dirname(__file__), "output")
 
 
-# ── Validation helpers ─────────────────────────────────────────────────────────
+# ── Mutable module-level shims ─────────────────────────────────────────────────
+# task1_collector.py and task2_migrator.py reference these names for the GitHub
+# path.  GitHubAdapter.migrate_repo() populates them from RunConfig before
+# delegating to those modules.  Do NOT read these directly — use RunConfig.
+SOURCE_TOKEN:  str  = ""
+SOURCE_REPO:   str  = ""
+DEST_TOKEN:    str  = ""
+DEST_OWNER:    str  = ""
+DEST_REPO:     str  = ""
+DEST_PRIVATE:  bool = True
 
-def _require(value: str, name: str) -> str:
-    """Assert a config value is non-empty, print a helpful error otherwise."""
-    if not value or not value.strip():
-        logger.error(
-            "Missing required config: %s — please set it in your .env file.", name
-        )
-        sys.exit(1)
-    return value.strip()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RunConfig dataclass
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _validate_token(token: str, label: str) -> dict:
+@dataclass
+class RunConfig:
     """
-    Hit GET /user with the given token to confirm it is valid and retrieve the
-    authenticated user's login name.
+    All configuration collected at runtime through GUI dialogs.
+    Passed directly to platform adapters.
 
-    Returns the parsed JSON response on success.
-    Exits with a clear message on 401 / 403 / any other error.
+    Attribute naming is platform-agnostic so adapters can share one interface:
+      source_*  — describes the repository being migrated FROM
+      dest_*    — describes the repository being migrated TO
     """
-    import requests  # local import so config stays importable even without requests
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    try:
-        resp = requests.get("https://api.github.com/user", headers=headers, timeout=15)
-    except requests.exceptions.ConnectionError as exc:
-        logger.error("[%s] Network error while validating token: %s", label, exc)
-        sys.exit(1)
+    platform:        str    # "github" | "gitlab"
 
-    if resp.status_code == 200:
-        data = resp.json()
-        logger.info("[%s] Token valid — authenticated as: %s", label, data.get("login"))
-        return data
-    elif resp.status_code == 401:
-        logger.error(
-            "[%s] Token is INVALID or expired (HTTP 401). "
-            "Check your .env file and regenerate the token if needed.",
-            label,
-        )
-        sys.exit(1)
-    elif resp.status_code == 403:
-        logger.error(
-            "[%s] Token lacks required scopes (HTTP 403). "
-            "Source token needs: repo, read:org  |  Dest token needs: repo, workflow.",
-            label,
-        )
-        sys.exit(1)
-    else:
-        logger.error(
-            "[%s] Unexpected response while validating token: HTTP %d — %s",
-            label,
-            resp.status_code,
-            resp.text[:200],
-        )
-        sys.exit(1)
+    # Source
+    source_token:    str
+    source_repo:     str    # "owner/repo" (GitHub) | "namespace/project" (GitLab)
+    source_base_url: str    # "https://github.com" | custom GitLab base URL
 
+    # Destination
+    dest_token:      str
+    dest_owner:      str    # GitHub username/org  | GitLab namespace
+    dest_repo:       str    # new repository / project name
+    dest_base_url:   str    # destination instance URL
+    dest_private:    bool   # make the destination private?
 
-def validate_all() -> None:
-    """
-    Validate every required config value and both GitHub tokens.
-    Call this once at startup (done automatically in main.py).
-    """
-    _require(SOURCE_TOKEN, "SOURCE_TOKEN")
-    _require(DEST_TOKEN,   "DEST_TOKEN")
-    _require(SOURCE_REPO,  "SOURCE_REPO")
-    _require(DEST_REPO,    "DEST_REPO")
-    _require(DEST_OWNER,   "DEST_OWNER")
-
-    if "/" not in SOURCE_REPO:
-        logger.error("SOURCE_REPO must be in 'owner/repo' format, got: %s", SOURCE_REPO)
-        sys.exit(1)
-
-    logger.info("Validating SOURCE_TOKEN …")
-    _validate_token(SOURCE_TOKEN, "SOURCE_TOKEN")
-
-    logger.info("Validating DEST_TOKEN …")
-    _validate_token(DEST_TOKEN,   "DEST_TOKEN")
-
-    logger.info("All configuration validated successfully.")
+    # Derived — not set by dialogs
+    output_dir: str = field(default_factory=lambda: OUTPUT_DIR)

@@ -33,3 +33,4 @@ migrator.log
 .idea/
 .vscode/
 *.swp
+test_mirror.git/

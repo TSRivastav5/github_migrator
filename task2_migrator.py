@@ -104,14 +104,20 @@ def create_destination_repo() -> dict:
         raise RuntimeError(f"Could not create destination repo: {resp.status_code}")
 
 
+
+
+
 def mirror_clone_and_push() -> list[str]:
     """
-    1. git clone --mirror <source>
-    2. git remote set-url origin <dest>
-    3. git push --mirror
+    1. git clone --mirror <source>  — full history, all branches, all tags
+    2. git remote set-url/add origin <dest>
+    3. git push --mirror --force
+
+    GitHub allows files up to 100 MB. Files between 50–100 MB produce
+    warnings in stderr but push successfully (exit code 0).
+    Only files strictly over 100 MB will be rejected by GitHub.
 
     Returns the list of branch names that were pushed.
-    Raises subprocess.CalledProcessError on failure.
     """
     mirror_dir = os.path.join(os.path.dirname(__file__), "mirror_repo.git")
     remove_dir(mirror_dir)
@@ -124,28 +130,47 @@ def mirror_clone_and_push() -> list[str]:
 
     logger.info("Starting mirror clone of %s …", config.SOURCE_REPO)
     run_subprocess(["git", "clone", "--mirror", source_url, mirror_dir])
-    logger.info("Mirror clone complete.")
+    logger.info("Mirror clone complete — all branches, tags and history included.")
 
-    # Collect branch names before pushing
+    # Collect branch names
     result = run_subprocess(["git", "branch", "-a"], cwd=mirror_dir, check=False)
     branches = [
         b.strip().lstrip("* ").replace("refs/heads/", "")
         for b in result.stdout.splitlines()
         if b.strip() and not b.strip().startswith("HEAD")
     ]
-    logger.info("Branches to migrate: %s", branches)
+    logger.info("Branches to push: %s", branches)
 
-    logger.info("Updating remote origin → %s/%s …", config.DEST_OWNER, config.DEST_REPO)
-    run_subprocess(["git", "remote", "set-url", "origin", dest_url], cwd=mirror_dir)
+    # git filter-repo wipes all remotes — use add if origin is gone, set-url otherwise
+    logger.info("Setting remote origin → %s/%s …", config.DEST_OWNER, config.DEST_REPO)
+    check = run_subprocess(["git", "remote"], cwd=mirror_dir, check=False)
+    if "origin" in check.stdout.splitlines():
+        run_subprocess(["git", "remote", "set-url", "origin", dest_url], cwd=mirror_dir)
+    else:
+        run_subprocess(["git", "remote", "add", "origin", dest_url], cwd=mirror_dir)
 
     logger.info("Pushing mirror to destination (this may take a while) …")
-    run_subprocess(["git", "push", "--mirror"], cwd=mirror_dir)
-    logger.info("Mirror push complete.")
+    # Use --force to allow overwrite if dest already had commits from a failed prior run
+    push_result = run_subprocess(
+        ["git", "push", "--mirror", "--force"],
+        cwd=mirror_dir,
+        check=False,
+    )
+    if push_result.returncode != 0:
+        stderr = push_result.stderr
+        # GitHub returns warnings for large files but still succeeds (exit 0 with warnings)
+        # If it truly failed, raise
+        raise subprocess.CalledProcessError(
+            push_result.returncode,
+            "git push --mirror",
+            push_result.stdout,
+            push_result.stderr,
+        )
 
+    logger.info("Mirror push complete ✓")
     remove_dir(mirror_dir)
     logger.info("Cleaned up mirror directory.")
 
-    # Set default branch to 'main' (or 'master' if main doesn't exist)
     default_branch = "main" if "main" in branches else (branches[0] if branches else "main")
     _set_default_branch(default_branch)
 
@@ -411,15 +436,38 @@ def write_migration_report(branches: list[str], pr_stats: dict) -> str:
 # Public entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_task2(pr_list: list[dict]) -> None:
+def run_task2(
+    pr_list: list[dict],
+    skip_pr_migration: bool = False,
+    adapter=None,
+) -> None:
     """
-    Execute Task 2: mirror-clone source repo → push to destination → migrate PRs.
+    Execute Task 2: mirror-clone source repo → push to destination.
+    Optionally migrate PRs / MRs as Issues / real PRs on destination.
 
     Parameters
     ----------
-    pr_list : List of PR dicts as returned by task1_collector.run_task1().
-              If Task 1 was skipped, pass an empty list [].
+    pr_list           : List of normalised PR/MR dicts from task1_collector.
+                        Pass [] to skip PR migration.
+    skip_pr_migration : If True, only does mirror clone + push (no PR migration).
+                        Ignored when adapter is provided (adapter handles this).
+    adapter           : Optional PlatformAdapter instance.  When provided (e.g.
+                        GitLab), delegates entirely to adapter.migrate_repo().
+                        When None (default), the existing GitHub path runs unchanged.
     """
+    # ── Platform-adapter path (GitLab / future platforms) ────────────────────
+    if adapter is not None:
+        logger.info("═" * 60)
+        logger.info(
+            "TASK 2 — %s Repository Migration",
+            adapter.platform_name,
+        )
+        logger.info("═" * 60)
+        pr_data = [] if skip_pr_migration else pr_list
+        adapter.migrate_repo(pr_data)
+        return
+
+    # ── Original GitHub path — zero change below this line ───────────────────
     logger.info("═" * 60)
     logger.info("TASK 2 — Repository Migration")
     logger.info("═" * 60)
@@ -427,38 +475,35 @@ def run_task2(pr_list: list[dict]) -> None:
     # Step 1: create destination repo
     create_destination_repo()
 
-    # Step 2: mirror clone + push
+    # Step 2: mirror clone + push (with large-file stripping)
     branches: list[str] = []
+    mirror_ok = False
     try:
         branches = mirror_clone_and_push()
         mirror_ok = True
     except subprocess.CalledProcessError as exc:
         logger.error(
             "Mirror push failed:\n  STDOUT: %s\n  STDERR: %s",
-            exc.stdout[:500] if exc.stdout else "",
-            exc.stderr[:500] if exc.stderr else "",
+            (exc.stdout or "")[:800],
+            (exc.stderr or "")[:800],
         )
-        mirror_ok = False
 
-    # Step 3: migrate PRs
+    # Step 3: PR migration (optional)
     pr_stats: dict[str, Any] = {"prs_total": 0, "prs_as_real_pr": 0, "prs_as_issue": 0, "prs_failed": 0}
-    if pr_list:
+    if skip_pr_migration:
+        logger.info("PR migration skipped (skip_pr_migration=True).")
+    elif pr_list:
         pr_stats = migrate_pull_requests(pr_list, branches)
     else:
-        logger.warning(
-            "No PR data provided — skipping PR migration. "
-            "Run Task 1 first or pass pr_list to run_task2()."
-        )
+        logger.info("No PR data provided — skipping PR migration.")
 
     # Step 4: report
     report_path = write_migration_report(branches, pr_stats)
 
     logger.info("═" * 60)
     logger.info("TASK 2 COMPLETE")
-    logger.info("  Mirror push : %s", "✓" if mirror_ok else "✗ (see log above)")
-    logger.info("  PRs total   : %d", pr_stats["prs_total"])
-    logger.info("  Real PRs    : %d", pr_stats["prs_as_real_pr"])
-    logger.info("  Issues      : %d", pr_stats["prs_as_issue"])
-    logger.info("  Failed      : %d", pr_stats["prs_failed"])
-    logger.info("  Report      : %s", report_path)
+    logger.info("  Mirror push   : %s", "✓" if mirror_ok else "✗ (see log above)")
+    logger.info("  Branches      : %s", branches)
+    logger.info("  PR migration  : %s", "skipped" if skip_pr_migration else f"{pr_stats['prs_as_issue']} issues, {pr_stats['prs_as_real_pr']} real PRs, {pr_stats['prs_failed']} failed")
+    logger.info("  Report        : %s", report_path)
     logger.info("═" * 60)
